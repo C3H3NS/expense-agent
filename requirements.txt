@@ -2,8 +2,8 @@
 fastapi==0.115.0
 uvicorn[standard]==0.30.0
 
-# LLM
-anthropic==0.39.0
+# LLM（用 OpenAI SDK 兼容接口，支持 DeepSeek/通义千问/Kimi 等国内模型）
+openai==1.51.0
 
 # HTTP 客户端
 httpx==0.27.0

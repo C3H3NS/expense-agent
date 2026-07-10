@@ -7,7 +7,7 @@
 员工在飞书提交交通费报销单 → AI 智能体自动完成：
 1. **OCR 识别**：从发票图片中提取金额、日期、抬头等关键字段
 2. **规则检查**：硬性规则校验（金额上限、抬头匹配、日期合理性）
-3. **AI 审核**：Claude 做软判断（合理性分析、风险评估、异常模式检测）
+3. **AI 审核**：大模型做软判断（合理性分析、风险评估、异常模式检测）
 4. **结果推送**：审核建议推送到飞书，审批人一键查看
 
 ## 技术栈
@@ -15,10 +15,17 @@
 | 组件 | 技术 | 说明 |
 |------|------|------|
 | Web 框架 | FastAPI | 接收飞书 Webhook，返回响应 |
-| LLM | Anthropic Claude | 软判断：合理性分析、风险评估 |
+| LLM | DeepSeek（默认） | 国内直连，OpenAI 兼容接口，可无缝切换通义千问/Kimi |
 | OCR | 百度云文字识别 | 增值税发票专用模型，识别率 >98% |
 | 数据校验 | Pydantic | 结构化数据模型 |
 | 审批流 | 飞书 Open API | 审批回调 + 消息推送 |
+
+### 为什么用 DeepSeek 而不是 Claude？
+
+- **国内直连**：不需要代理/VPN，客户部署也能用
+- **价格极低**：deepseek-chat ¥1/百万token（Claude Sonnet 约 ¥21/百万token）
+- **OpenAI 兼容接口**：想换其他模型只改 `.env` 里的 `LLM_BASE_URL` 和 `LLM_MODEL`
+- **能力足够**：报销审核是结构化判断任务，DeepSeek 完全胜任
 
 ## 项目结构
 
@@ -49,7 +56,7 @@ expense-agent/
 
 ```bash
 # 克隆项目
-git clone https://github.com/YOUR_USERNAME/expense-agent.git
+git clone https://github.com/C3H3NS/expense-agent.git
 cd expense-agent
 
 # 创建虚拟环境
@@ -68,12 +75,23 @@ pip install -r requirements.txt
 cp .env.example .env
 
 # 编辑 .env，填入你的 API Key：
-# - ANTHROPIC_API_KEY: https://console.anthropic.com/
+# - LLM_API_KEY: https://platform.deepseek.com/ 注册获取（默认 DeepSeek）
 # - BAIDU_API_KEY / BAIDU_SECRET_KEY: https://console.bce.baidu.com/
 # - FEISHU_APP_ID / FEISHU_APP_SECRET: https://open.feishu.cn/
 ```
 
-### 3. 运行
+### 3. 切换 LLM（可选）
+
+如果你想用其他国内大模型，只需修改 `.env` 中的两行：
+
+| 模型 | LLM_BASE_URL | LLM_MODEL |
+|------|-------------|-----------|
+| DeepSeek（默认） | `https://api.deepseek.com` | `deepseek-chat` |
+| 通义千问 | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen-plus` |
+| Kimi (月之暗面) | `https://api.moonshot.cn/v1` | `moonshot-v1-8k` |
+| 智谱 GLM | `https://open.bigmodel.cn/api/paas/v4` | `glm-4-flash` |
+
+### 4. 运行
 
 ```bash
 python main.py
@@ -102,7 +120,7 @@ OCR 识别发票图片 → 提取金额/日期/抬头/销售方
     ↓
 规则引擎硬判断 → 金额上限/抬头匹配/日期合理性/月度累计
     ↓
-Claude AI 软判断 → 合理性分析/异常模式检测/风险评级
+LLM 软判断 → 合理性分析/异常模式检测/风险评级
     ↓
 组装审核报告 → 推送飞书消息给审批人
 ```

@@ -1,5 +1,8 @@
 """
 配置管理模块 —— 所有配置从这里读取，不要在其他文件里写死任何值。
+
+LLM 部分使用 OpenAI 兼容接口，支持 DeepSeek / 通义千问 / Kimi 等国内模型，
+只需修改 .env 中的 LLM_BASE_URL 和 LLM_MODEL 即可切换。
 """
 from pydantic_settings import BaseSettings
 from typing import Optional
@@ -15,9 +18,10 @@ class Settings(BaseSettings):
     debug: bool = False
     port: int = 8000
 
-    # Anthropic
-    anthropic_api_key: str = ""
-    anthropic_model: str = "claude-sonnet-4-20250514"
+    # LLM（OpenAI 兼容接口，默认 DeepSeek）
+    llm_api_key: str = ""
+    llm_base_url: str = "https://api.deepseek.com"
+    llm_model: str = "deepseek-chat"
 
     # 百度 OCR
     baidu_api_key: str = ""
@@ -44,7 +48,7 @@ settings = Settings()
 
 # 启动时检查关键配置
 if os.path.exists(".env"):
-    required_keys = ["anthropic_api_key", "baidu_api_key", "feishu_app_id"]
+    required_keys = ["llm_api_key", "baidu_api_key", "feishu_app_id"]
     missing = [k for k in required_keys if not getattr(settings, k)]
     if missing:
         warnings.warn(f"缺少必要配置项: {missing}，请检查 .env 文件")

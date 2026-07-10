@@ -1,17 +1,19 @@
 """
-AI 审核 —— 让 Claude 做"软判断"。
+AI 审核 —— 让大模型做"软判断"。
 
 规则引擎管硬约束（金额、抬头、日期），
 LLM 管软判断（合理性、异常模式、风险评级）。
 
 各司其职，不越界。
+
+使用 OpenAI 兼容接口，默认 DeepSeek，可无缝切换到通义千问/Kimi 等。
 """
 import json
 import time
 import os
 from typing import List
 
-import anthropic
+from openai import OpenAI
 from loguru import logger
 
 from config import settings
@@ -23,8 +25,11 @@ from models import (
 
 class AiReviewer:
     def __init__(self):
-        self.client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
-        self.model = settings.anthropic_model
+        self.client = OpenAI(
+            api_key=settings.llm_api_key,
+            base_url=settings.llm_base_url,
+        )
+        self.model = settings.llm_model
         self.prompt_template = self._load_prompt_template()
 
     def _load_prompt_template(self) -> str:
@@ -56,7 +61,7 @@ class AiReviewer:
         reason: str = "",
     ) -> list:
         """
-        将所有数据组装成发送给 Claude 的消息。
+        将所有数据组装成发送给 LLM 的消息。
         """
         invoice_lines = []
         for i, ocr in enumerate(ocr_results):
@@ -106,7 +111,7 @@ class AiReviewer:
 
     def _parse_ai_response(self, response_text: str) -> AiReviewReport:
         """
-        解析 Claude 返回的 JSON。
+        解析 LLM 返回的 JSON。
         LLM 有时不严格按格式输出，所以要做容错处理。
         """
         text = response_text.strip()
@@ -156,34 +161,35 @@ class AiReviewer:
         logger.info(f"[AI] 开始审核，使用模型: {self.model}")
 
         try:
-            response = self.client.messages.create(
+            response = self.client.chat.completions.create(
                 model=self.model,
                 max_tokens=500,
                 temperature=0.1,
                 messages=messages,
             )
 
-            response_text = response.content[0].text
+            response_text = response.choices[0].message.content
             elapsed_ms = int((time.time() - start_time) * 1000)
 
-            logger.info(f"[AI] 审核完成，耗时 {elapsed_ms}ms, tokens={response.usage.output_tokens}")
+            total_tokens = 0
+            if response.usage:
+                total_tokens = response.usage.total_tokens
+
+            logger.info(f"[AI] 审核完成，耗时 {elapsed_ms}ms, tokens={total_tokens}")
 
             report = self._parse_ai_response(response_text)
             report.model_used = self.model
-            report.tokens_used = response.usage.input_tokens + response.usage.output_tokens
+            report.tokens_used = total_tokens
             report.processing_time_ms = elapsed_ms
 
             return report
 
-        except anthropic.APIError as e:
-            logger.error(f"[AI] Claude API 错误: {e}")
-            return self._fallback_to_rules(rule_result)
         except Exception as e:
-            logger.error(f"[AI] 未预期错误: {e}")
+            logger.error(f"[AI] LLM API 错误: {e}")
             return self._fallback_to_rules(rule_result)
 
     def _fallback_to_rules(self, rule_result: BatchRuleCheckResult) -> AiReviewReport:
-        """Claude API 不可用时的降级方案"""
+        """LLM API 不可用时的降级方案"""
         if rule_result.overall_status == "rejected":
             action = ReviewAction.REJECT
             risk = RiskLevel.HIGH

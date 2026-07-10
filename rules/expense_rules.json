@@ -1,0 +1,54 @@
+{
+  "version": "1.0",
+  "updated_at": "2026-07-10",
+  "author": "财务部",
+
+  "expense_types": {
+    "交通费": {
+      "allowed_invoice_types": ["加油票", "停车票", "过路费票"],
+      "rules": {
+        "single_limit": {
+          "name": "单张金额上限",
+          "limit": 500,
+          "severity": "error",
+          "message": "单张发票金额 {actual}元超过上限{limit}元"
+        },
+        "monthly_limit": {
+          "name": "月度累计上限",
+          "limit": 3000,
+          "severity": "warning",
+          "message": "本月交通费累计 {actual}元，接近/超过月度上限{limit}元"
+        },
+        "buyer_name_match": {
+          "name": "发票抬头匹配",
+          "required_company_name": "",
+          "severity": "error",
+          "message": "发票抬头'{actual}'与公司名称不符"
+        },
+        "date_reasonable": {
+          "name": "开票日期合理性",
+          "max_days_before_event": 7,
+          "max_days_after_today": 0,
+          "severity": "error",
+          "message": "发票日期{actual}超出合理范围"
+        },
+        "invoice_type_allowed": {
+          "name": "发票类型允许",
+          "severity": "warning",
+          "message": "发票类型'{actual}'不在交通费允许范围内"
+        }
+      }
+    }
+  },
+
+  "auto_pass_conditions": {
+    "description": "满足以下全部条件时可自动通过（Phase 1 不启用）",
+    "enabled": false,
+    "conditions": [
+      "total_amount <= 2000",
+      "no_error_level_violations",
+      "all_confidence >= 0.9",
+      "ai_risk_level == low"
+    ]
+  }
+}

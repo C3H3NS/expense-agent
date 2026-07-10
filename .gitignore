@@ -1,0 +1,30 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# 环境配置
+.env
+
+# 日志
+logs/
+*.log
+
+# 测试数据
+tests/sample_invoices/*.jpg
+tests/sample_invoices/*.png
+tests/sample_invoices/*.jpeg
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

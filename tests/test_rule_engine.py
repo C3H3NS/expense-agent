@@ -115,3 +115,20 @@ class TestInvoiceType:
         result = engine.check_single_invoice(invoice)
         type_violations = [v for v in result.violations if "类型" in v.rule_name]
         assert len(type_violations) == 0
+
+
+class TestMonthlySpentInSingleCheck:
+    """Bug修复2: check_single_invoice 应该检查月度累计"""
+
+    def test_single_invoice_monthly_exceed(self, make_invoice, engine):
+        """
+        单张发票金额 200（未超单张限额），
+        但 monthly_spent_so_far=2900，200+2900=3100 > 3000 月度限额 → 应标记 warning。
+        """
+        invoice = make_invoice(amount=200.0)
+        result = engine.check_single_invoice(
+            invoice, monthly_spent_so_far=2900.0
+        )
+        monthly_violations = [v for v in result.violations if "月度" in v.rule_name]
+        assert len(monthly_violations) == 1
+        assert monthly_violations[0].severity == Severity.WARNING

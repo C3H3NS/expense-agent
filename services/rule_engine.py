@@ -152,6 +152,21 @@ class RuleEngine:
                 severity=Severity.WARNING,
             ))
 
+        # ---- 规则5：月度累计预检（单张级别）----
+        monthly_limit_cfg = rules_config.get("monthly_limit", {})
+        monthly_limit = monthly_limit_cfg.get("limit", 999999)
+        projected_total = ocr_result.amount + monthly_spent_so_far
+        if projected_total > monthly_limit:
+            violations.append(RuleViolation(
+                rule_name=monthly_limit_cfg.get("name", "月度累计上限"),
+                description=monthly_limit_cfg.get("message", "本月累计{actual}元，接近/超过月度上限{limit}元").format(
+                    actual=projected_total, limit=monthly_limit
+                ),
+                severity=Severity(monthly_limit_cfg.get("severity", "warning")),
+                actual_value=projected_total,
+                limit_value=float(monthly_limit),
+            ))
+
         # ---- 汇总结果 ----
         has_error = any(v.severity == Severity.ERROR for v in violations)
 

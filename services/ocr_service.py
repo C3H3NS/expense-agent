@@ -54,15 +54,23 @@ class OcrService:
         logger.info(f"[OCR] Access Token 已获取，有效期至 {datetime.fromtimestamp(self._token_expires_at)}")
         return self._access_token
 
-    async def _call_ocr_api(self, image_url: str) -> dict:
+    async def _call_ocr_api(self, image_url: str = None, image_base64: str = None) -> dict:
         """
         调用百度 OCR API 识别一张图片。
-        使用「增值税发票识别」接口（对汽车发票效果最好）。
+        支持两种输入：
+        - image_url: 图片公开 URL（百度直接下载）
+        - image_base64: 图片 base64 编码（飞书下载的图片不是公开URL，需转 base64）
         """
         token = await self._get_access_token()
 
         api_url = f"https://aip.baidubce.com/rest/2.0/ocr/v1/vat_invoice?access_token={token}"
-        payload = {"url": image_url}
+        payload = {}
+        if image_url:
+            payload["url"] = image_url
+        elif image_base64:
+            payload["image"] = image_base64
+        else:
+            raise BaiduOcrError("必须提供 image_url 或 image_base64")
 
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(api_url, data=payload)
@@ -143,17 +151,17 @@ class OcrService:
 
     async def recognize(self, image_url: str) -> OcrResult:
         """
-        公开方法：识别单张发票图片。
+        公开方法：识别单张发票图片（通过 URL）。
 
         Args:
-            image_url: 图片 URL（支持 http/https 或本地路径转 base64）
+            image_url: 图片 URL（必须是百度可访问的公网 URL）
 
         Returns:
             OcrResult: 结构化识别结果
         """
-        logger.info(f"[OCR] 开始识别: {image_url}")
+        logger.info(f"[OCR] 开始识别(URL): {image_url}")
 
-        raw_result = await self._call_ocr_api(image_url)
+        raw_result = await self._call_ocr_api(image_url=image_url)
         parsed = self._parse_ocr_result(raw_result, image_url)
 
         if parsed.confidence < 0.85:
@@ -164,9 +172,36 @@ class OcrService:
 
         return parsed
 
+    async def recognize_bytes(self, image_data: bytes, source_label: str = "feishu_download") -> OcrResult:
+        """
+        公开方法：识别单张发票图片（通过二进制数据）。
+
+        用于飞书下载的图片（非公开URL），先转 base64 再发给百度 OCR。
+
+        Args:
+            image_data: 图片二进制数据
+            source_label: 来源标记（用于日志）
+
+        Returns:
+            OcrResult: 结构化识别结果
+        """
+        image_base64 = base64.b64encode(image_data).decode("utf-8")
+        logger.info(f"[OCR] 开始识别(base64): {source_label}, {len(image_data)} bytes")
+
+        raw_result = await self._call_ocr_api(image_base64=image_base64)
+        parsed = self._parse_ocr_result(raw_result, source_label)
+
+        if parsed.confidence < 0.85:
+            logger.warning(
+                f"[OCR] 低置信度 ({parsed.confidence:.2f})，"
+                f"建议人工复核: {source_label}"
+            )
+
+        return parsed
+
     async def batch_recognize(self, image_urls: List[str]) -> List[OcrResult]:
         """
-        批量识别多张发票。
+        批量识别多张发票（通过 URL）。
 
         注意：百度 OCR 有 QPS 限制（免费版 2QPS），
         所以这里做了简单的并发控制。
@@ -195,4 +230,35 @@ class OcrService:
                 final_results.append(r)
 
         logger.info(f"[OCR] 批量识别完成: {len(final_results)}/{len(image_urls)} 成功")
+        return final_results
+
+    async def batch_recognize_bytes(self, image_data_list: List[bytes]) -> List[OcrResult]:
+        """
+        批量识别多张发票（通过二进制数据）。
+
+        用于飞书下载的图片，逐张转 base64 发给百度 OCR。
+        """
+        import asyncio
+
+        semaphore = asyncio.Semaphore(2)
+
+        async def _recognize_one(data: bytes, index: int) -> OcrResult:
+            async with semaphore:
+                return await self.recognize_bytes(data, source_label=f"feishu_download_{index}")
+
+        tasks = [_recognize_one(data, i) for i, data in enumerate(image_data_list)]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        final_results = []
+        for i, r in enumerate(results):
+            if isinstance(r, Exception):
+                logger.error(f"[OCR] 第{i+1}张发票识别失败: {r}")
+                final_results.append(OcrResult(
+                    confidence=0.0,
+                    raw_text=f"ERROR: {str(r)}"
+                ))
+            else:
+                final_results.append(r)
+
+        logger.info(f"[OCR] 批量识别完成: {len(final_results)}/{len(image_data_list)} 成功")
         return final_results

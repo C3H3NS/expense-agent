@@ -7,7 +7,7 @@ import json
 import hashlib
 import hmac
 import base64
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 import httpx
 from loguru import logger
@@ -173,17 +173,130 @@ class FeishuService:
         self._token_expires_at = now + data.get("expire", 7200)
         return self._tenant_access_token
 
+    # ==================== 附件下载 ====================
+
+    async def download_form_image(self, file_token: str, file_name: str = "invoice.jpg") -> bytes:
+        """
+        通过飞书 API 下载审批表单中的附件图片。
+        
+        飞书审批附件下载接口：
+        POST https://open.feishu.cn/open-apis/drive/v1/medias/{file_token}/download
+        
+        Returns:
+            bytes: 图片二进制数据
+        """
+        token = await self._get_tenant_token()
+
+        url = f"https://open.feishu.cn/open-apis/drive/v1/medias/{file_token}/download"
+        headers = {"Authorization": f"Bearer {token}"}
+        params = {"extra": json.dumps({"bitablePerm": {"tableId": "", "rev": 0}})}
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(url, headers=headers, params=params)
+
+        if resp.status_code != 200:
+            logger.error(f"[Feishu] 图片下载失败: {file_token}, status={resp.status_code}")
+            raise Exception(f"图片下载失败: HTTP {resp.status_code}")
+
+        logger.info(f"[Feishu] 图片下载成功: {file_name} ({len(resp.content)} bytes)")
+        return resp.content
+
+    async def download_multiple_images(self, file_tokens: List[str]) -> List[bytes]:
+        """批量下载多张图片"""
+        import asyncio
+
+        semaphore = asyncio.Semaphore(3)  # 限制并发
+
+        async def _download_one(token: str) -> bytes:
+            async with semaphore:
+                return await self.download_form_image(token)
+
+        tasks = [_download_one(token) for token in file_tokens]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        final = []
+        for i, r in enumerate(results):
+            if isinstance(r, Exception):
+                logger.error(f"[Feishu] 第{i+1}张图片下载失败: {r}")
+                final.append(None)
+            else:
+                final.append(r)
+
+        return final
+
     # ==================== 审批数据解析 ====================
 
     @staticmethod
     def parse_approval_webhook(body: dict) -> Optional[Dict[str, Any]]:
         """
         解析飞书审批回调的请求体，提取我们需要的信息。
-
-        飞书审批回调的结构比较深，这里做一层扁平化。
-        具体字段需要对照实际飞书审批表单结构来调整。
+        支持 V2 事件格式。
         """
+        # URL 验证请求
+        if body.get("type") == "url_verification":
+            return {"challenge": body.get("challenge", ""), "is_verification": True}
+
+        # V2 事件格式
+        header = body.get("header", {})
+        event = body.get("event", body)  # 兼容 V1 和 V2
+        event_type = header.get("event_type") or body.get("event_type", "")
+
+        instance_code = event.get("instance_code", body.get("instance_code", ""))
+
+        # 解析表单
+        form_raw = event.get("form", "")
+        if isinstance(form_raw, str):
+            try:
+                form_items = json.loads(form_raw)
+            except json.JSONDecodeError:
+                form_items = []
+        elif isinstance(form_raw, list):
+            form_items = form_raw
+        else:
+            form_items = []
+
+        # 提取各字段
+        invoice_file_tokens = []
+        reason = ""
+        event_start_date_str = ""
+
+        for item in form_items:
+            name = item.get("name", "")
+            value = item.get("value", "")
+
+            # 发票图片字段（名称可能包含"发票"、"图片"、"附件"等关键词）
+            if any(kw in name for kw in ["发票", "图片", "附件", "票据"]):
+                if isinstance(value, str):
+                    try:
+                        files = json.loads(value)
+                        for f in files:
+                            token = f.get("file_token") or f.get("file_code")
+                            if token:
+                                invoice_file_tokens.append(token)
+                    except json.JSONDecodeError:
+                        pass
+                elif isinstance(value, list):
+                    for f in value:
+                        token = f.get("file_token") or f.get("file_code")
+                        if token:
+                            invoice_file_tokens.append(token)
+
+            # 报销事由
+            elif any(kw in name for kw in ["事由", "原因", "说明", "备注"]):
+                reason = value if isinstance(value, str) else str(value)
+
+            # 日期字段
+            elif any(kw in name for kw in ["日期", "时间", "出差"]):
+                if isinstance(value, str):
+                    event_start_date_str = value
+
         return {
-            "instance_code": body.get("instance_code", ""),
-            "event_type": body.get("event_type", ""),
+            "instance_code": instance_code,
+            "event_type": event_type,
+            "is_verification": False,
+            "invoice_file_tokens": invoice_file_tokens,
+            "reason": reason,
+            "event_start_date_str": event_start_date_str,
+            "open_id": event.get("open_id", ""),
+            "department_id": event.get("department_id", ""),
         }

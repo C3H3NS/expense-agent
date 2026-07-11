@@ -164,8 +164,10 @@ class RuleEngine:
 
     def _generate_summary(self, violations: List[RuleViolation], ocr: OcrResult) -> str:
         """生成一句话总结"""
+        type_str = ocr.invoice_type.value if ocr.invoice_type else "发票"
+
         if not violations:
-            return f"{ocr.invoice_type.value or '发票'} \u00a5{ocr.amount} - 无违规"
+            return f"{type_str} \u00a5{ocr.amount} - 无违规"
 
         errors = [v for v in violations if v.severity == Severity.ERROR]
         warns = [v for v in violations if v.severity == Severity.WARNING]
@@ -176,7 +178,7 @@ class RuleEngine:
         if warns:
             parts.append(f"{len(warns)}项提醒")
 
-        return f"{ocr.invoice_type.value or '发票'} \u00a5{ocr.amount} - {'; '.join(parts)}"
+        return f"{type_str} \u00a5{ocr.amount} - {'; '.join(parts)}"
 
     def batch_check(
         self,

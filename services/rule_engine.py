@@ -70,7 +70,7 @@ class RuleEngine:
                         },
                         "date_reasonable": {
                             "name": "日期合理性",
-                            "max_days_before": settings.expense_date_range_days,
+                            "max_days_before_event": settings.expense_date_range_days,
                             "severity": "error",
                             "message": "发票日期 {actual} 可能不属于本次事由期间"
                         },
@@ -125,7 +125,7 @@ class RuleEngine:
 
         # ---- 规则3：日期合理性 ----
         date_cfg = rules_config.get("date_reasonable", {})
-        max_days_before = date_cfg.get("max_days_before", 7)
+        max_days_before = date_cfg.get("max_days_before_event", 7)
         today = date.today()
 
         if ocr_result.issue_date:

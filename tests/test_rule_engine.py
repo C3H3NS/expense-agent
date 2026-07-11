@@ -81,6 +81,19 @@ class TestDateReasonable:
         assert len(date_violations) == 1
         assert date_violations[0].severity == Severity.ERROR
 
+    def test_date_uses_config_max_days(self, make_invoice, engine, today):
+        """
+        回归保护：验证 date_reasonable 规则正确读取配置值。
+        test_rules.json 中 max_days_before_event=7。
+        发票日期 8 天前 → 8 > 7 → 应该触发违规。
+        """
+        invoice = make_invoice(issue_date=today - timedelta(days=8))
+        result = engine.check_single_invoice(
+            invoice, event_start_date=today
+        )
+        date_violations = [v for v in result.violations if "日期" in v.rule_name]
+        assert len(date_violations) == 1, "8天前应该超过7天限制，触发违规"
+
 
 from models import InvoiceType
 

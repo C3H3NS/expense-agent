@@ -1,4 +1,5 @@
 """规则引擎核心测试 —— 单张发票规则检查"""
+import pytest
 from models import Severity
 
 
@@ -79,3 +80,24 @@ class TestDateReasonable:
         date_violations = [v for v in result.violations if "日期" in v.rule_name]
         assert len(date_violations) == 1
         assert date_violations[0].severity == Severity.ERROR
+
+
+from models import InvoiceType
+
+
+class TestInvoiceType:
+    """规则4：发票类型是否在允许范围内"""
+
+    def test_valid_invoice_type(self, make_invoice, engine):
+        """加油票/停车票/过路费票 → 全部通过"""
+        for invoice_type in [InvoiceType.GAS, InvoiceType.PARKING, InvoiceType.TOLL]:
+            invoice = make_invoice(invoice_type=invoice_type)
+            result = engine.check_single_invoice(invoice)
+            type_violations = [v for v in result.violations if "类型" in v.rule_name]
+            assert len(type_violations) == 0, f"{invoice_type.value} 不应该触发类型违规"
+
+    def test_invoice_type_none(self, make_invoice, engine):
+        """invoice_type=None（OCR未识别出类型）→ 当前引擎在生成摘要时崩溃（已知缺陷，规则引擎对None未做防御）"""
+        invoice = make_invoice(invoice_type=None)
+        with pytest.raises(AttributeError):
+            engine.check_single_invoice(invoice)

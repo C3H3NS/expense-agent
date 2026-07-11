@@ -89,8 +89,20 @@ class OcrService:
         words = raw.get("words", [])
 
         def get_field(field_name: str) -> Optional[str]:
-            field_data = words_result.get(field_name, {})
-            return field_data.get("word") if field_data else None
+            """兼容百度 OCR 的多种返回格式：字符串/字典/列表"""
+            field_data = words_result.get(field_name)
+            if field_data is None or field_data == "":
+                return None
+            if isinstance(field_data, str):
+                return field_data
+            if isinstance(field_data, dict):
+                return field_data.get("word")
+            if isinstance(field_data, list) and field_data:
+                first = field_data[0]
+                if isinstance(first, dict):
+                    return first.get("word")
+                return str(first)
+            return None
 
         def parse_money(val: Optional[str]) -> float:
             if not val:
@@ -128,14 +140,26 @@ class OcrService:
                     return InvoiceType.GAS
                 return InvoiceType.GAS
 
+        # 百度 OCR vat_invoice 接口返回英文字段名
+        # 文档: https://cloud.baidu.com/doc/OCR/s/nk3h7xy2t
         result = OcrResult(
-            invoice_type=detect_invoice_type(get_field("销售方名称"), get_field("发票类型")),
-            invoice_code=get_field("发票代码"),
-            invoice_number=get_field("发票号码"),
-            issue_date=parse_date(get_field("开票日期")),
-            amount=parse_money(get_field("价税合计(小写)") or get_field("金额")),
-            seller_name=get_field("销售方名称"),
-            buyer_name=get_field("购买方名称"),
+            invoice_type=detect_invoice_type(
+                get_field("SellerName") or get_field("销售方名称"),
+                get_field("InvoiceType") or get_field("发票类型"),
+            ),
+            invoice_code=get_field("InvoiceCode") or get_field("发票代码"),
+            invoice_number=get_field("InvoiceNum") or get_field("发票号码"),
+            issue_date=parse_date(
+                get_field("InvoiceDate") or get_field("开票日期")
+            ),
+            amount=parse_money(
+                get_field("AmountInFiguers")
+                or get_field("价税合计(小写)")
+                or get_field("TotalAmount")
+                or get_field("金额")
+            ),
+            seller_name=get_field("SellerName") or get_field("销售方名称"),
+            buyer_name=get_field("PurchaserName") or get_field("购买方名称"),
             confidence=raw.get("probability", {}).get("average", 0.95),
             image_url=image_url,
             raw_text="\n".join(words[:20]) if words else "",

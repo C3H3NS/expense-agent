@@ -112,9 +112,9 @@ async def debug_review_test():
     return {
         "status": "success",
         "elapsed_seconds": round(elapsed, 2),
-        "report": report.model_dump(),
-        "ai_detail": ai_report.model_dump(),
-        "rule_detail": rule_result.model_dump(),
+        "report": report.model_dump(mode="json"),
+        "ai_detail": ai_report.model_dump(mode="json"),
+        "rule_detail": rule_result.model_dump(mode="json"),
     }
 
 
@@ -181,10 +181,10 @@ async def debug_ocr_test(request: Request):
         return {
             "status": "success",
             "elapsed_seconds": round(elapsed, 2),
-            "ocr_results": [r.model_dump() for r in ocr_results],
-            "rule_detail": rule_result.model_dump(),
-            "ai_detail": ai_report.model_dump(),
-            "report": report.model_dump(),
+            "ocr_results": [r.model_dump(mode="json") for r in ocr_results],
+            "rule_detail": rule_result.model_dump(mode="json"),
+            "ai_detail": ai_report.model_dump(mode="json"),
+            "report": report.model_dump(mode="json"),
         }
 
     except Exception as e:

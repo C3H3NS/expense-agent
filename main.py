@@ -253,6 +253,27 @@ async def feishu_webhook(request: Request):
         logger.info(f"[Webhook] 非审批实例事件({event_type})，跳过")
         return JSONResponse({"code": 0, "msg": "ignored", "event_type": event_type})
 
+    # ===== 旧事件过滤：跳过延迟重投的积压事件 =====
+    # 飞书对未送达的事件会持续重试（可能延迟数十分钟），这些是调试期间积压的旧审批
+    # 如果审批操作时间距当前超过10分钟，说明是旧事件延迟重投，跳过不处理
+    operate_time_str = approval_info.get("instance_operate_time", "")
+    if operate_time_str:
+        try:
+            operate_time_sec = int(operate_time_str) / 1000.0  # 毫秒→秒
+            age_seconds = time.time() - operate_time_sec
+            if age_seconds > 600:  # 超过10分钟
+                age_min = int(age_seconds / 60)
+                logger.warning(
+                    f"[Webhook] 旧事件延迟重投，跳过: 实例={instance_code}, "
+                    f"审批提交于{age_min}分钟前, 跳过处理"
+                )
+                return JSONResponse({
+                    "code": 0, "msg": "stale_event_skipped",
+                    "instance_code": instance_code, "age_minutes": age_min
+                })
+            logger.info(f"[Webhook] 事件时效检查通过: 审批提交于{int(age_seconds)}秒前")
+        except (ValueError, TypeError):
+            logger.warning(f"[Webhook] instance_operate_time解析失败: {operate_time_str}")
     # ===== 去重 + 后台异步：立即返回200避免飞书超时重试 =====
     now = time.time()
     if instance_code and instance_code in _pending_tasks:

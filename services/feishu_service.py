@@ -290,6 +290,9 @@ class FeishuService:
                 if isinstance(value, str):
                     event_start_date_str = value
 
+        # 提取审批操作时间（毫秒时间戳），用于过滤延迟重投的旧事件
+        instance_operate_time = event.get("instance_operate_time", "")
+
         return {
             "instance_code": instance_code,
             "event_type": event_type,
@@ -299,6 +302,7 @@ class FeishuService:
             "event_start_date_str": event_start_date_str,
             "open_id": event.get("open_id", ""),
             "department_id": event.get("department_id", ""),
+            "instance_operate_time": instance_operate_time,
         }
 
     # ==================== 审批事件订阅 ====================

@@ -65,8 +65,9 @@ class AiReviewer:
         """
         invoice_lines = []
         for i, ocr in enumerate(ocr_results):
+            type_str = ocr.invoice_type.value if ocr.invoice_type else '未知'
             line = (
-                f"{i+1}. [{ocr.invoice_type.value or '未知'}] "
+                f"{i+1}. [{type_str}] "
                 f"\u00a5{ocr.amount:.2f} | "
                 f"{ocr.seller_name or '未知'} | "
                 f"日期:{ocr.issue_date or '未知'} | "

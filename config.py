@@ -48,7 +48,14 @@ settings = Settings()
 
 # 启动时检查关键配置
 if os.path.exists(".env"):
-    required_keys = ["llm_api_key", "baidu_api_key", "feishu_app_id"]
-    missing = [k for k in required_keys if not getattr(settings, k)]
-    if missing:
-        warnings.warn(f"缺少必要配置项: {missing}，请检查 .env 文件")
+    # LLM key 是核心依赖，缺失时强提醒
+    if not settings.llm_api_key:
+        warnings.warn("⚠️ LLM_API_KEY 未配置，AI 审核功能将不可用！请在 .env 中设置 DeepSeek API Key")
+    # 百度 OCR 和飞书是可选功能，缺失时仅提示
+    optional_keys = {
+        "baidu_api_key": "百度 OCR（发票识别功能不可用）",
+        "feishu_app_id": "飞书审批（Webhook 回调不可用）",
+    }
+    for k, desc in optional_keys.items():
+        if not getattr(settings, k):
+            warnings.warn(f"未配置 {k}：{desc}")

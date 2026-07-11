@@ -141,10 +141,15 @@ GET https://open.feishu.cn/open-apis/approval/v4/instances/{instance_code}
 ## 问题四：飞书延迟重投旧事件
 
 ### 症状
-用户未提交审批，但群机器人突然发了一条消息。
+用户未提交审批，但群机器人突然发了一条消息。调试期间多次出现（18:49、19:04）。
 
 ### 根因
-之前提交的审批（约17:44），当时服务器正在重启（18:29~18:36 多次重启），飞书 webhook 投递失败。飞书会**按指数退避策略重试**，约65分钟后（18:49）重试成功，送达了这条旧事件。
+调试期间服务器反复重启（18:29~18:36 多次重启），飞书 webhook 投递失败。飞书会**按指数退避策略重试**，约65分钟后重试成功，送达了积压的旧事件。
+
+调试期间提交的多个审批实例被飞书排队重投：
+- `31580EF4`：17:44提交 → 18:49送达（延迟65分钟）
+- `38DC146E`：17:58提交 → 19:04送达（延迟65分钟）
+- `82AB1298`：18:54提交 → 18:54送达（实时，服务器已稳定）
 
 ### 识别方法
 对比事件体中的两个时间戳：
@@ -153,8 +158,24 @@ GET https://open.feishu.cn/open-apis/approval/v4/instances/{instance_code}
 
 两者差值大于几分钟，说明是延迟重投的旧事件。
 
+### 解决方案：时间窗口过滤
+在 webhook handler 中增加旧事件过滤逻辑：
+1. `parse_approval_webhook` 提取 `instance_operate_time` 字段
+2. webhook handler 计算事件年龄 = 当前时间 - instance_operate_time
+3. 超过 **10分钟** 的旧事件自动跳过，返回 `stale_event_skipped`
+4. 日志记录跳过原因和事件年龄
+
+```python
+# 超过10分钟的旧事件跳过
+operate_time_sec = int(operate_time_str) / 1000.0
+age_seconds = time.time() - operate_time_sec
+if age_seconds > 600:
+    logger.warning(f"旧事件延迟重投，跳过: 实例={instance_code}, 审批提交于{age_min}分钟前")
+    return JSONResponse({"code": 0, "msg": "stale_event_skipped"})
+```
+
 ### 结论
-这不是 bug，是飞书正常的事件重试机制。服务器稳定运行后不会再出现。
+这不是 bug，是飞书正常的事件重试机制。通过时间窗口过滤，旧事件会被自动跳过，不再触发群机器人消息。
 
 ---
 

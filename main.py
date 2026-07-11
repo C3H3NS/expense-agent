@@ -12,6 +12,7 @@ import time
 import json
 from datetime import datetime, date
 from typing import List, Optional
+import asyncio
 
 from config import settings
 from models import (
@@ -24,7 +25,11 @@ from services.ai_reviewer import AiReviewer
 from services.feishu_service import FeishuService
 
 app = FastAPI(title=settings.app_name)
-logger.add("logs/app.log", rotation="10 MB", retention="7 days")
+# 避免重复添加文件日志sink（main.py会被导入两次：__main__ 和 main:app）
+import sys as _sys
+if not getattr(_sys, "_file_sink_added", False):
+    logger.add("logs/app.log", rotation="10 MB", retention="7 days")
+    _sys._file_sink_added = True
 
 
 # ====== 初始化服务实例（全局复用连接池等）======
@@ -32,6 +37,12 @@ ocr_service = OcrService()
 rule_engine = RuleEngine()
 ai_reviewer = AiReviewer()
 feishu_service = FeishuService()
+
+# ====== 去重：防止飞书重复推送导致群机器人发多次消息 ======
+# 飞书审批事件可能推送多次（如PENDING状态变更），用实例code去重，5分钟自动过期
+_processed_instances: dict = {}  # {instance_code: timestamp}
+# 后台任务追踪：防止同一个实例被重复创建后台任务
+_pending_tasks: dict = {}  # {instance_code: asyncio.Task}
 
 
 # ====== 健康检查 ======
@@ -192,6 +203,27 @@ async def debug_ocr_test(request: Request):
         return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
 
 
+@app.post("/debug/subscribe-approval")
+async def debug_subscribe_approval(request: Request):
+    """
+    订阅审批事件。飞书要求调用此API一次才能接收审批事件回调。
+    
+    请求体: {"approval_code": "58EAD7E5-FADD-465F-8680-124833F13E2A"}
+    """
+    body = await request.json()
+    approval_code = body.get("approval_code", "")
+
+    if not approval_code:
+        return JSONResponse({"error": "请提供 approval_code"}, status_code=400)
+
+    try:
+        result = await feishu_service.subscribe_approval(approval_code)
+        return {"status": "ok", "result": result}
+    except Exception as e:
+        logger.error(f"[Debug] 订阅审批事件失败: {e}")
+        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+
+
 # ====== 飞书 Webhook 入口 ======
 
 @app.post("/webhook/feishu")
@@ -216,37 +248,93 @@ async def feishu_webhook(request: Request):
     event_type = approval_info.get("event_type", "")
     logger.info(f"[Webhook] 处理审批实例: {instance_code}, 事件类型: {event_type}")
 
-    # 只处理审批创建事件
-    if event_type and "create" not in event_type.lower():
-        logger.info(f"[Webhook] 非创建事件({event_type})，跳过")
+    # 只处理审批实例事件（包括创建和状态变更）
+    if event_type and not any(kw in event_type.lower() for kw in ["create", "approval_instance"]):
+        logger.info(f"[Webhook] 非审批实例事件({event_type})，跳过")
         return JSONResponse({"code": 0, "msg": "ignored", "event_type": event_type})
 
-    try:
+    # ===== 去重 + 后台异步：立即返回200避免飞书超时重试 =====
+    now = time.time()
+    if instance_code and instance_code in _pending_tasks:
+        elapsed = now - _processed_instances.get(instance_code, now)
+        if elapsed < 300:
+            logger.info(f"[Webhook] 重复事件({instance_code})，后台任务已存在({elapsed:.0f}s前)，跳过")
+            return JSONResponse({"code": 0, "msg": "duplicate", "instance_code": instance_code})
+
+    if instance_code:
+        _processed_instances[instance_code] = now
+
+    # 启动后台异步任务处理审核流程
+    if instance_code:
         invoice_tokens = approval_info.get("invoice_file_tokens", [])
         reason = approval_info.get("reason", "")
         date_str = approval_info.get("event_start_date_str", "")
+        
+        task = asyncio.create_task(
+            _process_approval_async(
+                instance_code, invoice_tokens, reason, date_str,
+                feishu_service, ocr_service, rule_engine, ai_reviewer
+            )
+        )
+        _pending_tasks[instance_code] = task
+        logger.info(f"[Webhook] 后台任务已启动: {instance_code}")
 
-        logger.info(f"[Webhook] 发票图片: {len(invoice_tokens)} 张, 事由: {reason}")
+    # 立即返回200，避免飞书超时重试
+    return JSONResponse({
+        "code": 0,
+        "msg": "accepted",
+        "instance_code": instance_code,
+    })
 
+
+async def _process_approval_async(
+    instance_code: str,
+    invoice_tokens: list,
+    reason: str,
+    date_str: str,
+    feishu_svc,
+    ocr_svc,
+    rule_eng,
+    ai_svc,
+):
+    """后台异步处理审核全流程。"""
+    start = time.time()
+    logger.info(f"[Async] === 开始处理审批实例: {instance_code} ===")
+    try:
+        image_data_list = []
+
+        # ===== 事件体不含表单数据时，通过API兜底获取 =====
         if not invoice_tokens:
-            logger.warning("[Webhook] 未找到发票图片，跳过处理")
-            return JSONResponse({"code": 0, "msg": "no invoices found"})
+            logger.info(f"[Async] 事件体无表单数据，通过API获取审批实例 {instance_code}")
+            detail = await feishu_svc.get_instance_detail(instance_code)
+            form_data = FeishuService.extract_form_from_instance(detail)
+            image_urls = form_data.get("image_urls", [])
+            reason = form_data.get("reason") or reason
+            date_str = form_data.get("event_start_date_str") or date_str
+
+            logger.info(
+                f"[Async] API兜底: {len(image_urls)} 张图片, "
+                f"事由: {reason}, 日期: {date_str}"
+            )
+
+            if not image_urls:
+                logger.warning("[Async] 未找到发票图片，跳过")
+                return
+
+            image_data_list = await feishu_svc.download_images_from_urls(image_urls)
+        else:
+            image_data_list = await feishu_svc.download_multiple_images(invoice_tokens)
 
         # ===== 核心处理链 =====
-        start = time.time()
-
-        # 1. 下载发票图片
-        logger.info(f"[Webhook] 开始下载 {len(invoice_tokens)} 张发票图片...")
-        image_data_list = await feishu_service.download_multiple_images(invoice_tokens)
         valid_images = [img for img in image_data_list if img is not None]
-        logger.info(f"[Webhook] 图片下载完成: {len(valid_images)}/{len(invoice_tokens)}")
+        logger.info(f"[Async] 图片下载完成: {len(valid_images)}/{len(image_data_list)}")
 
         if not valid_images:
             raise Exception("所有发票图片下载失败")
 
         # 2. OCR 识别
-        ocr_results = await ocr_service.batch_recognize_bytes(valid_images)
-        logger.info(f"[Webhook] OCR 完成: {sum(1 for r in ocr_results if r.confidence > 0)}/{len(ocr_results)}")
+        ocr_results = await ocr_svc.batch_recognize_bytes(valid_images)
+        logger.info(f"[Async] OCR 完成: {sum(1 for r in ocr_results if r.confidence > 0)}/{len(ocr_results)}")
 
         # 3. 规则检查
         event_start_date = None
@@ -256,19 +344,13 @@ async def feishu_webhook(request: Request):
             except ValueError:
                 pass
 
-        rule_result = rule_engine.batch_check(
-            ocr_results,
-            event_start_date=event_start_date,
-        )
-        logger.info(f"[Webhook] 规则检查: {rule_result.overall_status}")
+        rule_result = rule_eng.batch_check(ocr_results, event_start_date=event_start_date)
+        logger.info(f"[Async] 规则检查: {rule_result.overall_status}")
 
         # 4. AI 审核
-        employee = EmployeeContext(
-            name="飞书用户",
-            department="未知部门",
-        )
-        ai_report = ai_reviewer.review(ocr_results, rule_result, employee, reason=reason)
-        logger.info(f"[Webhook] AI 审核: {ai_report.action.value}")
+        employee = EmployeeContext(name="飞书用户", department="未知部门")
+        ai_report = ai_svc.review(ocr_results, rule_result, employee, reason=reason)
+        logger.info(f"[Async] AI 审核: {ai_report.action.value}")
 
         # 5. 组装报告
         report = _assemble_report(
@@ -281,26 +363,16 @@ async def feishu_webhook(request: Request):
 
         # 6. 推送飞书
         if settings.feishu_bot_webhook:
-            await feishu_service.send_review_message(report)
-            logger.info(f"[Webhook] 审核结果已推送到飞书群")
-        else:
-            logger.warning("[Webhook] 未配置飞书机器人 Webhook，跳过推送")
+            await feishu_svc.send_review_message(report)
+            logger.info(f"[Async] 审核结果已推送到飞书群")
 
         elapsed = time.time() - start
-        logger.info(f"[Webhook] 处理完成: {instance_code}, 耗时 {elapsed:.2f}s")
-
-        return JSONResponse({
-            "code": 0,
-            "msg": "ok",
-            "processing_time": round(elapsed, 2),
-            "invoice_count": len(valid_images),
-            "rule_status": rule_result.overall_status,
-            "ai_action": ai_report.action.value,
-        })
+        logger.info(f"[Async] 处理完成: {instance_code}, 耗时 {elapsed:.2f}s")
 
     except Exception as e:
-        logger.error(f"[Webhook] 处理异常: {e}", exc_info=True)
-        return JSONResponse({"code": -1, "msg": str(e)}, status_code=500)
+        logger.error(f"[Async] 处理异常: {instance_code}: {e}", exc_info=True)
+    finally:
+        _pending_tasks.pop(instance_code, None)
 
 
 # ====== 辅助函数 ======

@@ -300,3 +300,163 @@ class FeishuService:
             "open_id": event.get("open_id", ""),
             "department_id": event.get("department_id", ""),
         }
+
+    # ==================== 审批事件订阅 ====================
+
+    async def subscribe_approval(self, approval_code: str) -> dict:
+        """
+        订阅指定审批定义的事件。必须调用一次才能收到审批事件。
+
+        文档: https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/approval-v4/approval/subscribe
+        """
+        token = await self._get_tenant_token()
+        url = f"https://open.feishu.cn/open-apis/approval/v4/approvals/{approval_code}/subscribe"
+
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(
+                url,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json; charset=utf-8",
+                },
+            )
+            data = resp.json()
+
+        logger.info(f"[Feishu] 订阅审批事件: code={data.get('code')}, msg={data.get('msg')}")
+        return data
+
+    # ==================== 审批实例详情 ====================
+
+    async def get_instance_detail(self, instance_code: str) -> dict:
+        """
+        获取审批实例的完整详情（含表单字段）。
+        
+        文档: https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/approval-v4/instance/get
+        
+        Returns:
+            dict: API 原始响应（含 data.form 表单字段列表）
+        """
+        token = await self._get_tenant_token()
+        url = f"https://open.feishu.cn/open-apis/approval/v4/instances/{instance_code}"
+
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(
+                url,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json; charset=utf-8",
+                },
+                params={"locale": "zh-CN"},
+            )
+            data = resp.json()
+
+        if data.get("code") != 0:
+            raise Exception(f"获取审批实例详情失败: {data}")
+
+        logger.info(f"[Feishu] 获取审批实例详情成功: {instance_code}")
+        return data
+
+    @staticmethod
+    def extract_form_from_instance(instance_detail: dict) -> Dict[str, Any]:
+        """
+        从审批实例详情中提取表单字段（图片URL、事由、日期）。
+        
+        Returns:
+            dict: {
+                "image_urls": [str],        # 发票图片的下载URL
+                "reason": str,              # 报销事由
+                "event_start_date_str": str,# 出差日期
+                "form_items": list,         # 原始表单条目（调试用）
+            }
+        """
+        # form 可能是 JSON 字符串，先解析
+        form_raw = instance_detail.get("data", {}).get("form", [])
+        if isinstance(form_raw, str):
+            try:
+                form_items = json.loads(form_raw)
+            except json.JSONDecodeError:
+                logger.error(f"[Feishu] 无法解析 form JSON: {form_raw[:200]}")
+                form_items = []
+        elif isinstance(form_raw, list):
+            form_items = form_raw
+        else:
+            form_items = []
+
+        image_urls = []
+        reason = ""
+        event_start_date_str = ""
+
+        for item in form_items:
+            name = item.get("name", "")
+            value = item.get("value", "")
+            item_type = item.get("type", "")
+
+            # 发票图片字段 — type 为 image/imageV2/attachmentV2
+            if any(kw in name for kw in ["发票", "图片", "附件", "票据"]):
+                if isinstance(value, list):
+                    for url in value:
+                        if isinstance(url, str) and url.strip():
+                            image_urls.append(url)
+                elif isinstance(value, str) and value.strip():
+                    # 兼容逗号分隔的字符串
+                    for url in value.split(","):
+                        url = url.strip()
+                        if url:
+                            image_urls.append(url)
+
+            # 报销事由 — type 为 input/textarea
+            elif any(kw in name for kw in ["事由", "原因", "说明"]):
+                reason = value if isinstance(value, str) else str(value)
+
+            # 日期字段 — type 为 date（可能嵌套在 fieldList 中）
+            elif any(kw in name for kw in ["日期", "时间"]):
+                if isinstance(value, str):
+                    # RFC3339 格式，取前10位 yyyy-MM-dd
+                    event_start_date_str = value[:10] if len(value) >= 10 else value
+
+            # fieldList（明细/表格）中可能嵌套日期字段
+            elif item_type == "fieldList" and isinstance(value, list):
+                for row in value:
+                    if isinstance(row, list):
+                        for cell in row:
+                            if isinstance(cell, dict):
+                                cell_name = cell.get("name", "")
+                                if any(kw in cell_name for kw in ["日期", "时间", "出差"]):
+                                    cell_val = cell.get("value", "")
+                                    if isinstance(cell_val, str) and not event_start_date_str:
+                                        event_start_date_str = cell_val[:10] if len(cell_val) >= 10 else cell_val
+
+        return {
+            "image_urls": image_urls,
+            "reason": reason,
+            "event_start_date_str": event_start_date_str,
+            "form_items": form_items,
+        }
+
+    # ==================== 从URL下载图片 ====================
+
+    async def download_images_from_urls(self, image_urls: List[str]) -> List[bytes]:
+        """从飞书返回的临时URL下载图片"""
+        token = await self._get_tenant_token()
+
+        async def _download_one(url: str) -> Optional[bytes]:
+            try:
+                async with httpx.AsyncClient(timeout=30) as client:
+                    resp = await client.get(
+                        url,
+                        headers={"Authorization": f"Bearer {token}"},
+                    )
+                if resp.status_code == 200:
+                    logger.info(f"[Feishu] 图片下载成功: {len(resp.content)} bytes")
+                    return resp.content
+                else:
+                    logger.error(f"[Feishu] 图片下载失败: HTTP {resp.status_code}")
+                    return None
+            except Exception as e:
+                logger.error(f"[Feishu] 图片下载异常: {e}")
+                return None
+
+        import asyncio
+        tasks = [_download_one(url) for url in image_urls]
+        results = await asyncio.gather(*tasks)
+        return [r for r in results if r is not None]
